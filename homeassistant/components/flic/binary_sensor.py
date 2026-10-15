@@ -313,39 +313,56 @@ class FlicConnectionManager(threading.Thread):
         self._hass.add_job(self._start_ping_monitor)
 
         while not self._shutdown:
-            if self._client is None:
-                if self._reconnect_attempts > 0:
-                    self._log_reconnect_attempt()
-
-                if not self._connect():
-                    self._reconnect_attempts += 1
-                    self._backoff_sleep()
-                    continue
-
-                _LOGGER.info("Connected to flicd at %s:%s", self._host, self._port)
-                self._reconnect_attempts = 0
-
-                if self._buttons:
-                    self._restore_buttons()
-                else:
-                    self._setup_client()
-
-            self._connected = True
-            assert self._client is not None
-
             try:
-                self._client.handle_events()
-            except OSError as ex:
-                _LOGGER.debug("flicd event loop ended: %s", ex)
-
-            self._connected = False
-
-            if not self._shutdown:
-                _LOGGER.warning("Connection to flicd lost")
+                self._run_once()
+            except Exception:
+                # Any unexpected error (e.g. a send failing while restoring
+                # channels, or a callback raising inside handle_events) would
+                # otherwise end this thread and stop all reconnection attempts.
+                _LOGGER.exception("Unexpected error in flic connection manager")
+                self._connected = False
+                self._force_disconnect()
                 self._client = None
-                self._reconnect_attempts = 1
+                if self._shutdown:
+                    break
+                self._reconnect_attempts = max(self._reconnect_attempts, 1)
+                self._backoff_sleep()
 
         _LOGGER.debug("Flic connection manager shutdown complete")
+
+    def _run_once(self) -> None:
+        """Connect if needed, then process events until the connection ends."""
+        if self._client is None:
+            if self._reconnect_attempts > 0:
+                self._log_reconnect_attempt()
+
+            if not self._connect():
+                self._reconnect_attempts += 1
+                self._backoff_sleep()
+                return
+
+            _LOGGER.info("Connected to flicd at %s:%s", self._host, self._port)
+            self._reconnect_attempts = 0
+
+            if self._buttons:
+                self._restore_buttons()
+            else:
+                self._setup_client()
+
+        self._connected = True
+        assert self._client is not None
+
+        try:
+            self._client.handle_events()
+        except OSError as ex:
+            _LOGGER.debug("flicd event loop ended: %s", ex)
+
+        self._connected = False
+
+        if not self._shutdown:
+            _LOGGER.warning("Connection to flicd lost")
+            self._client = None
+            self._reconnect_attempts = 1
 
 
 def setup_platform(

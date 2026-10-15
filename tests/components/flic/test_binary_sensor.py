@@ -707,3 +707,51 @@ async def test_reconnect_logging_tiers(
     manager._reconnect_attempts = 300
     manager._log_reconnect_attempt()
     assert caplog.text == ""
+
+
+async def test_connection_manager_survives_unexpected_error(
+    hass: HomeAssistant,
+) -> None:
+    """Test an error while restoring buttons does not stop reconnection."""
+    add_entities_mock = MagicMock()
+    config = {
+        CONF_HOST: "localhost",
+        CONF_PORT: 5551,
+        CONF_DISCOVERY: False,
+        CONF_TIMEOUT: 3,
+    }
+    manager = FlicConnectionManager(hass, "localhost", 5551, config, add_entities_mock)
+    manager._buttons = [
+        FlicButton(hass, MockFlicClient(), "80:e4:da:78:6e:11", 3, None)
+    ]
+
+    clients: list[MockFlicClient] = []
+
+    class FlakyThenHealthyClient(MockFlicClient):
+        """First client fails while restoring channels, the second works."""
+
+        def add_connection_channel(self, channel) -> None:
+            if len(clients) == 1:
+                raise BrokenPipeError("Broken pipe")
+            super().add_connection_channel(channel)
+
+        def handle_events(self) -> None:
+            manager._shutdown = True
+
+    def make_client(host: str, port: int) -> MockFlicClient:
+        client = FlakyThenHealthyClient(host, port)
+        clients.append(client)
+        return client
+
+    mock_pyflic.FlicClient = make_client
+
+    with (
+        patch("homeassistant.components.flic.binary_sensor.time.sleep"),
+        patch.object(manager, "_start_ping_monitor"),
+    ):
+        manager.run()
+        await hass.async_block_till_done()
+
+    assert len(clients) == 2
+    assert len(clients[1].channels) == 1
+    mock_pyflic.FlicClient = MockFlicClient
